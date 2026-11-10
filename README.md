@@ -23,7 +23,7 @@ src/WordDrawer.Data        SQLite 数据层（词书、学习状态、每日统�
 src/WordDrawer.Review      FSRS-5 调度器
 tests/                     33 个单元测试
 installer/                 Inno Setup 脚本
-output/verify/             开发期用的自动化脚本（截图、UI 自动化、数据校验）
+tools/                     词书生成脚本
 ```
 
 ## 构建
@@ -58,10 +58,10 @@ curl -L -o en_US-lessac-medium.onnx \
 ```
 
 **ECDICT 词典**（`ecdict.csv`，65MB）。词书是用它的标签子集生成的，脚本在
-`output/verify/extract_books.py`，产物（三本 JSON）已提交在 `Assets/` 下：
+`tools/extract_books.py`，产物（三本 JSON）已提交在 `Assets/` 下：
 
 ```bash
-cd output/verify && python extract_books.py cet4 cet4-2027.json
+cd tools && python extract_books.py cet4 cet4-2027.json
 ```
 
 ## 数据

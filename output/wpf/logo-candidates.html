@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --ink:#182633; --muted:#5b7185; --accent:#2899d6; }
+  body {
+    margin:0; padding:28px 32px; background:#eef4f9;
+    font-family:"Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif; color:var(--ink);
+  }
+  h1 { font-size:15px; font-weight:600; margin:0 0 4px; letter-spacing:.2px; }
+  p.sub { font-size:11px; color:var(--muted); margin:0 0 22px; }
+  .row { display:flex; gap:18px; align-items:flex-start; }
+  .card {
+    background:#fff; border:1px solid #dbe6ef; border-radius:16px; padding:16px;
+    width:186px; box-shadow:0 8px 24px rgba(11,35,58,.06);
+  }
+  .card h2 { font-size:12px; margin:0 0 2px; font-weight:600; }
+  .card .why { font-size:10px; color:var(--muted); line-height:1.5; min-height:44px; margin-bottom:10px; }
+  .sizes { display:flex; align-items:flex-end; gap:12px; }
+  .sizes svg { display:block; }
+  .tiny { display:flex; gap:8px; align-items:center; margin-top:12px; padding-top:10px; border-top:1px dashed #e2ecf4; }
+  .tiny span { font-size:9px; color:var(--muted); }
+  .darkstrip {
+    margin-top:22px; background:#1b2836; border-radius:12px; padding:14px 18px;
+    display:flex; gap:26px; align-items:center;
+  }
+  .darkstrip svg { display:block; }
+  .darkstrip span { color:#9fb4c6; font-size:10px; }
+</style>
+</head>
+<body>
+  <h1>词隙 · 图标方向（4 选 1）</h1>
+  <p class="sub">左侧是 96px 主尺寸，右下是 24px 任务栏实际大小——小尺寸看不清的细节等于没有。</p>
+
+  <div class="row">
+
+    <!-- A: sliding slab -->
+    <div class="card">
+      <h2>A · 抽出的卡片</h2>
+      <div class="why">一块从右缘滑出的面板，中间留一道缝。最直白对应「贴边抽屉」。</div>
+      <div class="sizes">
+        <svg width="96" height="96" viewBox="0 0 96 96">
+          <defs>
+            <linearGradient id="ga" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#3fb2ea"/><stop offset="1" stop-color="#1b74b3"/>
+            </linearGradient>
+          </defs>
+          <rect x="0" y="0" width="96" height="96" rx="26" fill="url(#ga)"/>
+          <rect x="18" y="22" width="34" height="52" rx="8" fill="#ffffff" opacity="0.95"/>
+          <rect x="60" y="22" width="18" height="52" rx="6" fill="#ffffff" opacity="0.5"/>
+          <rect x="54.5" y="22" width="3" height="52" fill="#0f5b90" opacity="0.35"/>
+        </svg>
+      </div>
+      <div class="tiny">
+        <svg width="24" height="24" viewBox="0 0 96 96">
+          <rect width="96" height="96" rx="26" fill="#2899d6"/>
+          <rect x="18" y="22" width="34" height="52" rx="8" fill="#fff"/>
+          <rect x="60" y="22" width="18" height="52" rx="6" fill="#fff" opacity="0.5"/>
+        </svg>
+        <span>24px</span>
+      </div>
+    </div>
+
+    <!-- B: light gap -->
+    <div class="card">
+      <h2>B · 一道缝的光</h2>
+      <div class="why">深色底上斜切一道发光缝隙 —— 直取「隙」字，最有记忆点，也最抽象。</div>
+      <div class="sizes">
+        <svg width="96" height="96" viewBox="0 0 96 96">
+          <defs>
+            <linearGradient id="gb" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#22344a"/><stop offset="1" stop-color="#0e1b28"/>
+            </linearGradient>
+            <linearGradient id="gb2" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#7fe3ff"/><stop offset="1" stop-color="#2899d6"/>
+            </linearGradient>
+          </defs>
+          <rect width="96" height="96" rx="26" fill="url(#gb)"/>
+          <path d="M56 14 L40 82" stroke="url(#gb2)" stroke-width="9" stroke-linecap="round"/>
+          <path d="M56 14 L40 82" stroke="#bff0ff" stroke-width="2.4" stroke-linecap="round" opacity="0.9"/>
+        </svg>
+      </div>
+      <div class="tiny">
+        <svg width="24" height="24" viewBox="0 0 96 96">
+          <rect width="96" height="96" rx="26" fill="#22344a"/>
+          <path d="M56 14 L40 82" stroke="#4ec3f2" stroke-width="12" stroke-linecap="round"/>
+        </svg>
+        <span>24px</span>
+      </div>
+    </div>
+
+    <!-- C: W with gap -->
+    <div class="card">
+      <h2>C · 断开的 W</h2>
+      <div class="why">W 的中间笔画断开一截，缺口就是「隙」。保留首字母，识别最稳。</div>
+      <div class="sizes">
+        <svg width="96" height="96" viewBox="0 0 96 96">
+          <defs>
+            <linearGradient id="gc" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#37a9e4"/><stop offset="1" stop-color="#1a6fae"/>
+            </linearGradient>
+          </defs>
+          <rect width="96" height="96" rx="26" fill="url(#gc)"/>
+          <g stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none">
+            <path d="M20 30 L32 68"/>
+            <path d="M32 68 L46 38"/>
+            <path d="M50 38 L64 68"/>
+            <path d="M64 68 L76 30"/>
+          </g>
+        </svg>
+      </div>
+      <div class="tiny">
+        <svg width="24" height="24" viewBox="0 0 96 96">
+          <rect width="96" height="96" rx="26" fill="#2899d6"/>
+          <g stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none">
+            <path d="M20 30 L34 68"/><path d="M34 68 L48 36"/><path d="M52 36 L66 68"/><path d="M66 68 L78 30"/>
+          </g>
+        </svg>
+        <span>24px</span>
+      </div>
+    </div>
+
+    <!-- D: page stack -->
+    <div class="card">
+      <h2>D · 抽出的那页</h2>
+      <div class="why">三页纸，最上面一张向右滑出并带投影。偏「词典/卡片」气质，最温和。</div>
+      <div class="sizes">
+        <svg width="96" height="96" viewBox="0 0 96 96">
+          <defs>
+            <linearGradient id="gd" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#2ea4de"/><stop offset="1" stop-color="#18679f"/>
+            </linearGradient>
+          </defs>
+          <rect width="96" height="96" rx="26" fill="url(#gd)"/>
+          <rect x="20" y="30" width="40" height="40" rx="6" fill="#ffffff" opacity="0.34"/>
+          <rect x="26" y="26" width="44" height="44" rx="7" fill="#ffffff" opacity="0.62"/>
+          <rect x="32" y="22" width="46" height="46" rx="8" fill="#ffffff"/>
+          <g stroke="#2b8ec8" stroke-width="3" stroke-linecap="round">
+            <path d="M42 36 H66"/><path d="M42 45 H60"/><path d="M42 54 H52"/>
+          </g>
+        </svg>
+      </div>
+      <div class="tiny">
+        <svg width="24" height="24" viewBox="0 0 96 96">
+          <rect width="96" height="96" rx="26" fill="#2899d6"/>
+          <rect x="20" y="30" width="40" height="40" rx="6" fill="#fff" opacity="0.4"/>
+          <rect x="30" y="22" width="48" height="48" rx="8" fill="#fff"/>
+        </svg>
+        <span>24px</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="darkstrip">
+    <span>深色任务栏上：</span>
+    <svg width="40" height="40" viewBox="0 0 96 96">
+      <rect width="96" height="96" rx="26" fill="#2899d6"/>
+      <rect x="18" y="22" width="34" height="52" rx="8" fill="#fff"/>
+      <rect x="60" y="22" width="18" height="52" rx="6" fill="#fff" opacity="0.5"/>
+    </svg>
+    <svg width="40" height="40" viewBox="0 0 96 96">
+      <rect width="96" height="96" rx="26" fill="#22344a"/>
+      <path d="M56 14 L40 82" stroke="#4ec3f2" stroke-width="12" stroke-linecap="round"/>
+    </svg>
+    <svg width="40" height="40" viewBox="0 0 96 96">
+      <rect width="96" height="96" rx="26" fill="#2899d6"/>
+      <g stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none">
+        <path d="M20 30 L34 68"/><path d="M34 68 L48 36"/><path d="M52 36 L66 68"/><path d="M66 68 L78 30"/>
+      </g>
+    </svg>
+    <svg width="40" height="40" viewBox="0 0 96 96">
+      <rect width="96" height="96" rx="26" fill="#2899d6"/>
+      <rect x="20" y="30" width="40" height="40" rx="6" fill="#fff" opacity="0.4"/>
+      <rect x="30" y="22" width="48" height="48" rx="8" fill="#fff"/>
+    </svg>
+    <span>（依次为 A / B / C / D）</span>
+  </div>
+</body>
+</html>

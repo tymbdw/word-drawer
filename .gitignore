@@ -1,0 +1,39 @@
+# Build output
+bin/
+obj/
+build/
+*.user
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+output/verify/*.db
+output/audio/
+output/verify/*.wav
+
+# Screenshots / captures produced during development
+output/wpf/*.png
+output/playwright/*.png
+
+# Speech engine + model (98 MB) — see README for how to fetch it
+src/WordDrawer.App/piper/
+
+# Large upstream data (65 MB). The extracted wordbooks under Assets are committed.
+ecdict.csv
+*.zip
+
+# Editor / OS noise
+.vs/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Unrelated project that happens to live in this folder
+wmj figma game/
+.playwright-cli/
+
+# Design exports / captures
+output/playwright/
+*.mp4
+*.svg.tmp

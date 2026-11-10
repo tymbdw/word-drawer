@@ -1,0 +1,1592 @@
+﻿using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Threading;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Windows.Controls;
+using System.Windows.Media.Imaging;
+using WordDrawer.Core;
+using WordDrawer.Data;
+using WordDrawer.Review;
+using MColor = System.Windows.Media.Color;
+using Drawing = System.Drawing;
+using Forms = System.Windows.Forms;
+
+namespace WordDrawer.App;
+
+public partial class MainWindow : Window
+{
+    private readonly DispatcherTimer _hideTimer;
+    private readonly DispatcherTimer _studyTimer;
+    private const double SnapDistance = DrawerLayout.DefaultSnapDistance;
+    private bool _isFloating;
+    private string _activeBookName = "—";
+    private Drawing.Bitmap? _dragPlate;
+    private System.Windows.Point _dragOrigin;
+    private double _dragStartLeft;
+    private double _dragStartTop;
+    private bool _dragging;
+    private Border? _selectedHeatCell;
+    private IReadOnlyDictionary<DateOnly, DailyStat> _heatStats = new Dictionary<DateOnly, DailyStat>();
+    private long _lastDragFrame;
+    private int _bookCount = 1;
+    private readonly StudyClock _clock = new(IdleThresholdFromEnvironment());
+
+    /// <summary>WORDDRAWER_IDLE_SECONDS overrides the three minute idle threshold (testing aid).</summary>
+    private static TimeSpan? IdleThresholdFromEnvironment()
+    {
+        var raw = Environment.GetEnvironmentVariable("WORDDRAWER_IDLE_SECONDS");
+        return int.TryParse(raw, out var seconds) && seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : null;
+    }
+    private readonly DispatcherTimer _edgeTimer;
+    private readonly Forms.NotifyIcon _trayIcon;
+    private readonly WordDrawerDatabase _database = new(AppDataPaths.DatabasePath);
+    private readonly ReviewScheduler _reviewScheduler = new();
+    private readonly List<SessionEntry> _session = [];
+    private readonly HashSet<int> _answered = [];
+    private int _sessionTotal;
+
+    private sealed record SessionEntry(StudyWord Word, ReviewCard? Card);
+
+    private DockSide _dockSide = DockSide.Right;
+    private bool _isPinned;
+    private bool _isHidden;
+    private bool _isReview;
+    private int _wordIndex;
+    private int _newRemaining;
+    private int _reviewRemaining;
+    private int _todayStudied;
+    private int _totalStudied;
+    private bool _isRecordingFeedback;
+    private byte _glassAlpha = 0x62;
+    private byte _glassR = 0xE7;
+    private byte _glassG = 0xF5;
+    private byte _glassB = 0xFD;
+    private string _theme = "mist";
+    private int _dailyTarget = 50;
+    private int _releaseLimit = 200;
+    private bool _autoHide = true;
+    private bool _launchOnStartup;
+
+    private static readonly System.Windows.Media.Brush AccentBrush =
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x28, 0x99, 0xD6)));
+
+    private static readonly System.Windows.Media.Brush BorderSoftBrush =
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x26, 0x42, 0x5D, 0x70)));
+
+    private static System.Windows.Media.Brush Frozen(System.Windows.Media.Brush brush)
+    {
+        brush.Freeze();
+        return brush;
+    }
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        VersionText.Text = $"v{typeof(MainWindow).Assembly.GetName().Version?.ToString(3)}";
+        ApplyGlassTint();
+        ParkOffScreen();
+        _trayIcon = CreateTrayIcon();
+        _studyTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _studyTimer.Tick += (_, _) =>
+        {
+            if (StudyView.Visibility != Visibility.Visible)
+            {
+                return;
+            }
+
+            _clock.Advance(TimeSpan.FromSeconds(1), IdleTime());
+        };
+        _edgeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
+        _edgeTimer.Tick += (_, _) => PollEdgeTrigger();
+        _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(650) };
+        _hideTimer.Tick += (_, _) =>
+        {
+            _hideTimer.Stop();
+            if (!_isPinned && !IsMouseOver)
+            {
+                HideDrawer();
+            }
+        };
+        Loaded += async (_, _) =>
+        {
+            // Stay parked off screen until the theme is applied and the backdrop is
+            // sampled, then slide in already frosted (no flat-colour flash).
+            await InitializeDataAsync();
+        };
+        Closed += (_, _) =>
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+        };
+    }
+
+    private Rect WorkArea => MonitorWorkAreaProvider.GetFor(this);
+
+    /// <summary>
+    /// Places the window at the collapsed position before it is first shown. Otherwise it
+    /// would flash at the OS default position and, if the pointer happens to sit there,
+    /// receive a bogus MouseLeave and collapse on startup.
+    /// </summary>
+    private void ParkOffScreen()
+    {
+        var area = SystemParameters.WorkArea;
+        Left = DrawerLayout.HiddenLeft(_dockSide, area.Left, area.Width, ContentWidth) - ShadowInset;
+        Top = area.Top + Math.Max(12, (area.Height - ContentHeight) / 2) - ShadowInset;
+    }
+
+    private const byte DefaultGlassAlpha = 0x4E;
+    private const double EdgeGap = DrawerLayout.DefaultEdgeGap;
+
+    // The window is larger than the visible panel so the drop shadow has room to fade.
+    private const double ShadowInset = 44;
+    private const double ContentWidth = 360;
+    private const double ContentHeight = 520;
+
+    /// <summary>
+    /// Frosted veil opacity. Overridable through WORDDRAWER_GLASS_ALPHA (0-255) so the
+    /// level can be compared without a rebuild; the default is the shipping value.
+    /// </summary>
+    private void ApplyGlassTint()
+    {
+        var alpha = DefaultGlassAlpha;
+        var raw = Environment.GetEnvironmentVariable("WORDDRAWER_GLASS_ALPHA");
+        if (byte.TryParse(raw, out var parsed))
+        {
+            alpha = parsed;
+        }
+
+        _glassAlpha = alpha;
+        ApplyTheme();
+    }
+
+    /// <summary>Applies the palette for the current material. Night needs its own text and surface colours.</summary>
+    private void ApplyTheme()
+    {
+        var night = _theme == "night";
+        var ice = _theme == "ice";
+
+        SetBrush("TextPrimary", night ? MColor.FromRgb(0xE8, 0xF2, 0xFA) : MColor.FromRgb(0x18, 0x26, 0x33));
+        SetBrush("TextSecondary", night ? MColor.FromRgb(0xC6, 0xDC, 0xEA) : MColor.FromRgb(0x5B, 0x71, 0x85));
+        SetBrush("Accent", night ? MColor.FromRgb(0x5B, 0xC8, 0xF5) : MColor.FromRgb(0x28, 0x99, 0xD6));
+        SetBrush("StrokeStrong", night ? MColor.FromArgb(0x40, 0xCC, 0xEE, 0xFF) : MColor.FromArgb(0x8F, 0xFF, 0xFF, 0xFF));
+        SetBrush("StrokeSoft", night ? MColor.FromArgb(0x33, 0x80, 0xB4, 0xCC) : MColor.FromArgb(0x26, 0x42, 0x5D, 0x70));
+        SetBrush("Divider", night ? MColor.FromArgb(0x26, 0xC8, 0xE8, 0xFA) : MColor.FromArgb(0x1A, 0x42, 0x5D, 0x70));
+        SetBrush("ButtonFill", night ? MColor.FromArgb(0x2E, 0xFF, 0xFF, 0xFF) : MColor.FromArgb(0x16, 0xFF, 0xFF, 0xFF));
+        SetBrush("PanelFill", night ? MColor.FromArgb(0x3D, 0x0C, 0x1D, 0x2B) : MColor.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+        SetBrush("PanelStroke", night ? MColor.FromArgb(0x33, 0xCC, 0xEE, 0xFF) : MColor.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+        SetBrush("TrackFill", night ? MColor.FromArgb(0x33, 0xC8, 0xE8, 0xFA) : MColor.FromArgb(0x20, 0x42, 0x5D, 0x70));
+        SetBrush("PrimaryFill", night ? MColor.FromRgb(0xF2, 0xF8, 0xFC) : MColor.FromRgb(0x18, 0x26, 0x33));
+        SetBrush("PrimaryText", night ? MColor.FromRgb(0x16, 0x23, 0x2E) : MColor.FromRgb(0xF6, 0xFA, 0xFC));
+        Resources["CardSurface"] = BuildCardSurface(night, ice);
+
+        (_glassR, _glassG, _glassB) = _theme switch
+        {
+            "ice" => ((byte)0xD1, (byte)0xED, (byte)0xFB),
+            "night" => ((byte)0x0C, (byte)0x1D, (byte)0x2B),
+            _ => ((byte)0xE7, (byte)0xF5, (byte)0xFD)
+        };
+
+        GlassSurface.Background = new SolidColorBrush(MColor.FromArgb(EffectiveGlassAlpha, _glassR, _glassG, _glassB));
+    }
+
+    /// <summary>
+    /// Night glass has to be much more opaque: a 30% dark veil over a bright desktop
+    /// leaves light text on a light panel.
+    /// </summary>
+    private byte EffectiveGlassAlpha => _theme == "night"
+        ? (byte)Math.Max((int)_glassAlpha, 0xB0)
+        : _glassAlpha;
+
+    private void SetBrush(string key, MColor color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        Resources[key] = brush;
+    }
+
+    private static LinearGradientBrush BuildCardSurface(bool night, bool ice)
+    {
+        var start = night
+            ? MColor.FromArgb(0x8C, 0x18, 0x30, 0x3F)
+            : ice
+                ? MColor.FromArgb(0x7C, 0xE8, 0xF6, 0xFF)
+                : MColor.FromArgb(0x7C, 0xF6, 0xFC, 0xFF);
+        var end = night
+            ? MColor.FromArgb(0x3D, 0x0C, 0x1D, 0x2B)
+            : MColor.FromArgb(0x2A, 0xFF, 0xFF, 0xFF);
+
+        var brush = new LinearGradientBrush(start, end, new System.Windows.Point(0, 0), new System.Windows.Point(1, 1));
+        brush.Freeze();
+        return brush;
+    }
+
+    /// <summary>
+    /// Samples the desktop behind the drawer's docked rectangle and feeds it to the
+    /// blurred backdrop layer. Only call this while the window is not covering that
+    /// rectangle, otherwise the window captures itself.
+    /// </summary>
+    private void RefreshBackdrop(Rect? floatingRect = null)
+    {
+        var area = WorkArea;
+        Rect dip;
+        if (_isFloating)
+        {
+            dip = floatingRect ?? new Rect(Left + ShadowInset, Top + ShadowInset, ContentWidth, ContentHeight);
+        }
+        else
+        {
+            var dockedTop = area.Top + Math.Max(12, (area.Height - ContentHeight) / 2);
+            var dockedLeft = DrawerLayout.VisibleLeft(_dockSide, area.Left, area.Width, ContentWidth, EdgeGap);
+            dip = new Rect(dockedLeft, dockedTop, ContentWidth, ContentHeight);
+        }
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var physical = new Rect(
+            dip.X * dpi.DpiScaleX,
+            dip.Y * dpi.DpiScaleY,
+            dip.Width * dpi.DpiScaleX,
+            dip.Height * dpi.DpiScaleY);
+
+        var concealed = (int)Math.Round(8 * dpi.DpiScaleX);
+
+        // The caller must make sure the window is not covering the rectangle it asks for.
+        var glass = ScreenBackdrop.Compose(physical, concealed, EffectiveGlassAlpha, _glassR, _glassG, _glassB);
+        if (glass is not null)
+        {
+            var brush = new ImageBrush(glass) { Stretch = Stretch.Fill };
+            brush.Freeze();
+            GlassSurface.Background = brush;
+        }
+    }
+
+    /// <summary>
+    /// Slides the window off screen, samples the backdrop, then animates it back in.
+    /// </summary>
+    private void RevealWithFreshBackdrop()
+    {
+        if (_isFloating)
+        {
+            _isHidden = false;
+            ShowShadows(true);
+            var left = Left + ShadowInset;
+            var top = Top + ShadowInset;
+            RefreshFloatingBackdrop(left, top);
+            MoveTo(left - ShadowInset, animate: false);
+            Top = top - ShadowInset;
+            return;
+        }
+
+        // Hide the halo first: part of it would land inside the sampled rectangle.
+        WindowShadowFar.Visibility = Visibility.Collapsed;
+        WindowShadowNear.Visibility = Visibility.Collapsed;
+        MoveTo(DrawerLayout.HiddenLeft(_dockSide, WorkArea.Left, WorkArea.Width, ContentWidth) - ShadowInset, animate: false);
+        _isHidden = true;
+        RefreshBackdrop();
+        DockToCurrentSide(animate: true);
+    }
+
+    private async Task InitializeDataAsync()
+    {
+        try
+        {
+            StatusText.Text = "正在初始化本地数据库…";
+            await _database.InitializeAsync();
+
+            // Seed once: the bundled book has ~4800 words, re-inserting them on every
+            // launch would cost a visible startup delay for no benefit.
+            // Adding new books must not steal the active flag from the one in use.
+            var before = await _database.GetWordBookSummariesAsync();
+            var previousActive = before.FirstOrDefault(book => book.IsActive)?.Id;
+
+            foreach (var book in BuiltInWordBooks.All)
+            {
+                if (await _database.WordBookExistsAsync(book.Name))
+                {
+                    continue;
+                }
+
+                StatusText.Text = $"正在写入{book.Name}…";
+                await _database.SeedWordBookAsync(book.Name, book.Source, BuiltInWordBooks.Load(book));
+            }
+
+            // Never end up with no active book.
+            if (previousActive is { } keep && before.All(book => book.Id != keep || !book.IsActive))
+            {
+                await _database.SetActiveWordBookAsync(keep);
+            }
+
+            var seeded = await _database.GetWordBookSummariesAsync();
+            if (seeded.Count > 0 && seeded.All(book => !book.IsActive))
+            {
+                await _database.SetActiveWordBookAsync(seeded[^1].Id);
+                seeded = await _database.GetWordBookSummariesAsync();
+            }
+
+            _activeBookName = seeded.FirstOrDefault(book => book.IsActive)?.Name ?? "—";
+            _bookCount = Math.Max(1, seeded.Count);
+
+            var dashboard = await _database.GetDashboardAsync(DateOnly.FromDateTime(DateTime.Today));
+            _newRemaining = await _database.CountUnstudiedWordsAsync();
+            _reviewRemaining = dashboard.DueReviewCount;
+            _todayStudied = dashboard.TodayUniqueWordsStudied;
+            _totalStudied = dashboard.UniqueWordsStudied;
+            await LoadSettingsAsync();
+            RefreshDashboard();
+            StatusText.Text = "本地数据库已就绪";
+        }
+        catch (Exception exception)
+        {
+            StartStudyButton.IsEnabled = false;
+            StartReviewButton.IsEnabled = false;
+            StatusText.Text = $"数据库初始化失败：{exception.Message}";
+            // Never leave the window parked off screen with no way to find it.
+            DockToCurrentSide(animate: false);
+        }
+    }
+
+    private async Task LoadSettingsAsync()
+    {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        _dailyTarget = Math.Clamp(await _database.GetDailyNewWordTargetAsync(today), 10, 200);
+        _releaseLimit = int.TryParse(await _database.GetSettingAsync("ReleaseLimit"), out var limit)
+            ? Math.Clamp(limit, 50, 500)
+            : ReviewScheduler.DefaultDailyReleaseLimit;
+        _theme = await _database.GetSettingAsync("Theme") is { Length: > 0 } theme ? theme : "mist";
+        _dockSide = string.Equals(await _database.GetSettingAsync("DockSide"), "Left", StringComparison.OrdinalIgnoreCase)
+            ? DockSide.Left
+            : DockSide.Right;
+        _autoHide = !string.Equals(await _database.GetSettingAsync("AutoHide"), "0", StringComparison.Ordinal);
+        _launchOnStartup = StartupRegistration.IsEnabled();
+
+        if (byte.TryParse(await _database.GetSettingAsync("GlassAlpha"), out var storedAlpha))
+        {
+            _glassAlpha = (byte)Math.Clamp((int)storedAlpha, 0x08, 0x96);
+        }
+
+        ApplyTheme();
+        UpdateSettingsUi();
+
+        var mode = await _database.GetSettingAsync("DockMode");
+        if (string.Equals(mode, "free", StringComparison.Ordinal))
+        {
+            _isFloating = true;
+            var area = WorkArea;
+            var x = double.TryParse(await _database.GetSettingAsync("FreeX"), out var fx) ? fx : area.Left + 120;
+            var y = double.TryParse(await _database.GetSettingAsync("FreeY"), out var fy) ? fy : area.Top + 120;
+            var left = DrawerLayout.ClampWithin(x, area.Left, area.Width, ContentWidth);
+            var top = DrawerLayout.ClampWithin(y, area.Top, area.Height, ContentHeight);
+            ShowShadows(true);
+            RefreshFloatingBackdrop(left, top);
+            MoveTo(left - ShadowInset, animate: false);
+            Top = top - ShadowInset;
+            StatusText.Text = string.Empty;
+            return;
+        }
+
+        // ApplyTheme leaves a flat fallback brush; re-sample so the frosted image is back
+        // before the drawer slides in.
+        RevealWithFreshBackdrop();
+    }
+
+    private void RefreshDashboard()
+    {
+        NewCountText.Text = _newRemaining.ToString();
+        ReviewCountText.Text = _reviewRemaining.ToString();
+        LearnedTodayText.Text = $"今天已完成 {_todayStudied} 个";
+        TotalStudiedText.Text = $"已学 {_totalStudied:N0}";
+        PlanPerDayText.Text = $"每日 {_dailyTarget} 词";
+        BookCountText.Text = $"当前 {_bookCount} 本";
+        var target = Math.Max(1, _dailyTarget);
+        var fraction = Math.Clamp(_todayStudied / (double)target, 0, 1);
+        // StrokeDashArray is expressed in multiples of StrokeThickness, not pixels.
+        const double ringDiameter = 72;
+        const double ringStroke = 6;
+        var units = Math.PI * ringDiameter / ringStroke;
+        ProgressArc.StrokeDashArray = new DoubleCollection { fraction * units, units };
+        // A zero-length dash with round caps still paints a dot, so hide the arc entirely.
+        ProgressArc.Visibility = fraction > 0.0005 ? Visibility.Visible : Visibility.Collapsed;
+        ProgressRingText.Text = _todayStudied.ToString(CultureInfo.InvariantCulture);
+        TodayTargetText.Text = $"目标 {target}";
+        TodayDateText.Text = DateTime.Today.ToString("M 月 d 日 · dddd", CultureInfo.GetCultureInfo("zh-CN"));
+        StartStudyButton.IsEnabled = _newRemaining > 0;
+        StartReviewButton.IsEnabled = true;
+    }
+
+    /// <summary>The window icon lives in the assembly, so the tray can use the same artwork.</summary>
+    private static Drawing.Icon LoadAppIcon()
+    {
+        try
+        {
+            var resource = System.Windows.Application.GetResourceStream(
+                new Uri("Assets/worddrawer.ico", UriKind.Relative));
+            if (resource?.Stream is { } stream)
+            {
+                using (stream)
+                {
+                    return new Drawing.Icon(stream);
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // fall through
+        }
+
+        return Drawing.SystemIcons.Application;
+    }
+
+    private Forms.NotifyIcon CreateTrayIcon()
+    {
+        var menu = new Forms.ContextMenuStrip();
+        menu.Items.Add("显示词隙", null, (_, _) => ShowFromTray());
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add("贴到左侧", null, (_, _) => DockFromTray(DockSide.Left));
+        menu.Items.Add("贴到右侧", null, (_, _) => DockFromTray(DockSide.Right));
+        menu.Items.Add("固定窗口", null, (_, _) => TogglePinFromTray());
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add("退出", null, (_, _) => Dispatcher.Invoke(Close));
+
+        var icon = new Forms.NotifyIcon
+        {
+            Icon = LoadAppIcon(),
+            Text = "词隙 · Word Drawer",
+            Visible = true,
+            ContextMenuStrip = menu
+        };
+        icon.DoubleClick += (_, _) => ShowFromTray();
+        return icon;
+    }
+
+    private void ShowFromTray() => Dispatcher.Invoke(() =>
+    {
+        if (!IsVisible)
+        {
+            Show();
+        }
+
+        if (_isHidden)
+        {
+            RevealWithFreshBackdrop();
+        }
+        else
+        {
+            DockToCurrentSide(animate: true);
+        }
+
+        Activate();
+    });
+
+    private void DockFromTray(DockSide side) => Dispatcher.Invoke(() =>
+    {
+        _dockSide = side;
+        if (!IsVisible)
+        {
+            Show();
+        }
+
+        RevealWithFreshBackdrop();
+        Activate();
+    });
+
+    private void TogglePinFromTray() => Dispatcher.Invoke(TogglePin);
+
+    private void DockToCurrentSide(bool animate)
+    {
+        Top = WorkArea.Top + Math.Max(12, (WorkArea.Height - ContentHeight) / 2) - ShadowInset;
+        var target = DrawerLayout.VisibleLeft(_dockSide, WorkArea.Left, WorkArea.Width, ContentWidth, EdgeGap) - ShadowInset;
+        MoveTo(target, animate);
+        _isHidden = false;
+        _edgeTimer.Stop();
+        WindowShadowFar.Visibility = Visibility.Visible;
+        WindowShadowNear.Visibility = Visibility.Visible;
+        StatusText.Text = string.Empty;
+    }
+
+    private void HideDrawer()
+    {
+        var target = DrawerLayout.HiddenLeft(_dockSide, WorkArea.Left, WorkArea.Width, ContentWidth) - ShadowInset;
+        MoveTo(target, animate: true);
+        _isHidden = true;
+        _edgeTimer.Start();
+        // The shadow halo would otherwise stick out past the 8px trigger strip.
+        WindowShadowFar.Visibility = Visibility.Collapsed;
+        WindowShadowNear.Visibility = Visibility.Collapsed;
+        StatusText.Text = string.Empty;
+    }
+
+    private void MoveTo(double left, bool animate)
+    {
+        BeginAnimation(LeftProperty, null);
+        if (!animate || !SystemParameters.ClientAreaAnimation)
+        {
+            Left = left;
+            return;
+        }
+
+        var animation = new DoubleAnimation
+        {
+            To = left,
+            Duration = TimeSpan.FromMilliseconds(220),
+            EasingFunction = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 5 },
+            FillBehavior = FillBehavior.Stop
+        };
+        animation.Completed += (_, _) => Left = left;
+        BeginAnimation(LeftProperty, animation);
+    }
+
+    /// <summary>
+    /// MouseEnter only fires when this window is the top window at that pixel. Once another
+    /// application covers the 8px trigger strip - or any topmost window sits over it - the
+    /// drawer would never come out, so the trigger position is polled as well.
+    /// </summary>
+    private void PollEdgeTrigger()
+    {
+        if (!_isHidden || _isPinned)
+        {
+            return;
+        }
+
+        if (PresentationSource.FromVisual(this)?.CompositionTarget is not { } target)
+        {
+            return;
+        }
+
+        var cursor = System.Windows.Forms.Control.MousePosition;
+        var dip = target.TransformFromDevice.Transform(new System.Windows.Point(cursor.X, cursor.Y));
+
+        var insideX = dip.X >= Left && dip.X <= Left + ActualWidth;
+        var insideY = dip.Y >= Top && dip.Y <= Top + ActualHeight;
+        if (insideX && insideY)
+        {
+            RevealWithFreshBackdrop();
+        }
+    }
+
+    private void Window_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        _hideTimer.Stop();
+        if (_isHidden)
+        {
+            RevealWithFreshBackdrop();
+        }
+    }
+
+    private void Window_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_isPinned && _autoHide && !_isFloating)
+        {
+            _hideTimer.Stop();
+            _hideTimer.Start();
+        }
+    }
+
+    private void DockButton_Click(object sender, RoutedEventArgs e)
+    {
+        _dockSide = _dockSide == DockSide.Left ? DockSide.Right : DockSide.Left;
+        _isFloating = false;
+        _ = PersistPlacementAsync();
+        RevealWithFreshBackdrop();
+    }
+
+    private void PinButton_Click(object sender, RoutedEventArgs e)
+    {
+        TogglePin();
+    }
+
+    private void TogglePin()
+    {
+        _isPinned = !_isPinned;
+        PinButton.Opacity = _isPinned ? 1 : 0.72;
+        PinGlyph.StrokeThickness = _isPinned ? 2.1 : 1.6;
+        if (_isPinned && !_isFloating)
+        {
+            DockToCurrentSide(animate: true);
+        }
+        else
+        {
+            StatusText.Text = string.Empty;
+        }
+    }
+
+    private void Header_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ButtonState != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        // Snapshot the desktop once, with this window invisible, so every mouse move can
+        // re-cut the glass out of the plate instead of hitting the screen again.
+        var previousOpacity = Opacity;
+        Opacity = 0;
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        _dragPlate = ScreenBackdrop.CaptureScreen();
+        Opacity = previousOpacity;
+
+        if (_dragPlate is null)
+        {
+            return;
+        }
+
+        var cursor = System.Windows.Forms.Control.MousePosition;
+        var dpi = VisualTreeHelper.GetDpi(this);
+        _dragOrigin = new System.Windows.Point(cursor.X / dpi.DpiScaleX, cursor.Y / dpi.DpiScaleY);
+        _dragStartLeft = Left;
+        _dragStartTop = Top;
+        _dragging = true;
+        Mouse.Capture((IInputElement)sender);
+    }
+
+    /// <summary>Moves the window with the cursor and rebuilds the glass from the cached plate.</summary>
+    private void Header_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_dragging || e.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        var cursor = System.Windows.Forms.Control.MousePosition;
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var pointer = new System.Windows.Point(cursor.X / dpi.DpiScaleX, cursor.Y / dpi.DpiScaleY);
+
+        Left = _dragStartLeft + (pointer.X - _dragOrigin.X);
+        Top = _dragStartTop + (pointer.Y - _dragOrigin.Y);
+
+        var now = Environment.TickCount64;
+        if (now - _lastDragFrame < 12)
+        {
+            return;
+        }
+
+        _lastDragFrame = now;
+        RefreshBackdropFromPlate();
+    }
+
+    private void Header_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_dragging)
+        {
+            return;
+        }
+
+        _dragging = false;
+        Mouse.Capture(null);
+        _dragPlate?.Dispose();
+        _dragPlate = null;
+
+        var area = WorkArea;
+        var contentLeft = Left + ShadowInset;
+        var contentTop = Top + ShadowInset;
+        var target = DrawerLayout.SnapTarget(contentLeft, ContentWidth, area.Left, area.Width, SnapDistance);
+
+        if (target is { } side)
+        {
+            _dockSide = side;
+            _isFloating = false;
+            _ = PersistPlacementAsync();
+            RevealWithFreshBackdrop();
+            return;
+        }
+
+        FloatInPlace(contentTop);
+    }
+
+    /// <summary>Cheap glass refresh: cut the plate at the current position, blur, tint.</summary>
+    private void RefreshBackdropFromPlate()
+    {
+        if (_dragPlate is null)
+        {
+            return;
+        }
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var dip = new Rect(Left + ShadowInset, Top + ShadowInset, ContentWidth, ContentHeight);
+        var physical = new Rect(
+            dip.X * dpi.DpiScaleX,
+            dip.Y * dpi.DpiScaleY,
+            dip.Width * dpi.DpiScaleX,
+            dip.Height * dpi.DpiScaleY);
+
+        using var crop = ScreenBackdrop.Cropplate(_dragPlate, physical);
+        var glass = ScreenBackdrop.ComposeFrom(crop, EffectiveGlassAlpha, _glassR, _glassG, _glassB);
+        if (glass is null)
+        {
+            return;
+        }
+
+        var brush = new ImageBrush(glass) { Stretch = Stretch.Fill };
+        brush.Freeze();
+        GlassSurface.Background = brush;
+    }
+
+    /// <summary>Leaves the drawer where it was dropped and remembers that spot.</summary>
+    private void FloatInPlace(double contentTop)
+    {
+        var area = WorkArea;
+        _isFloating = true;
+        _isHidden = false;
+
+        var left = DrawerLayout.ClampWithin(Left + ShadowInset, area.Left, area.Width, ContentWidth);
+        var top = DrawerLayout.ClampWithin(contentTop, area.Top, area.Height, ContentHeight);
+
+        ShowShadows(true);
+        RefreshFloatingBackdrop(left, top);
+        MoveTo(left - ShadowInset, animate: false);
+        Top = top - ShadowInset;
+        StatusText.Text = "已放置在当前位置 · 拖到屏幕边缘可贴边";
+        _ = PersistPlacementAsync();
+    }
+
+    private async Task PersistPlacementAsync()
+    {
+        try
+        {
+            await _database.SetSettingAsync("DockMode", _isFloating ? "free" : "docked");
+            if (_isFloating)
+            {
+                await _database.SetSettingAsync("FreeX", (Left + ShadowInset).ToString(CultureInfo.InvariantCulture));
+                await _database.SetSettingAsync("FreeY", (Top + ShadowInset).ToString(CultureInfo.InvariantCulture));
+            }
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"保存位置失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Samples the desktop for a floating rectangle. The window is moved off screen first:
+    /// fading it out does not work because the blur capture happens on the UI thread, which
+    /// cannot repaint while it blocks.
+    /// </summary>
+    private void RefreshFloatingBackdrop(double contentLeft, double contentTop)
+    {
+        var area = WorkArea;
+        var parkLeft = area.Left - ContentWidth - ShadowInset * 2;
+        MoveTo(parkLeft, animate: false);
+        RefreshBackdrop(new Rect(contentLeft, contentTop, ContentWidth, ContentHeight));
+    }
+
+    private void ShowShadows(bool visible)
+    {
+        var state = visible ? Visibility.Visible : Visibility.Collapsed;
+        WindowShadowFar.Visibility = state;
+        WindowShadowNear.Visibility = state;
+    }
+
+    private void StartStudy_Click(object sender, RoutedEventArgs e) => _ = StartStudySessionAsync();
+
+    private void StartReview_Click(object sender, RoutedEventArgs e) => _ = StartReviewSessionAsync();
+
+    private void SettingsButton_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateSettingsUi();
+        ShowView(SettingsView);
+    }
+
+    private void NavigationPlaceholder_Click(object sender, RoutedEventArgs e)
+    {
+        var label = (sender as System.Windows.Controls.Button)?.Tag?.ToString() ?? "此页面";
+        switch (label)
+        {
+            case "词书":
+                _ = ShowWordBookAsync();
+                return;
+            case "学习计划":
+                UpdateSettingsUi();
+                ShowView(PlanView);
+                return;
+            case "学习成果":
+                _ = ShowResultsAsync();
+                return;
+        }
+
+        StatusText.Text = $"{label}页将在下一轮按原型接入";
+    }
+
+    private void BackToHome_Click(object sender, RoutedEventArgs e) => ShowView(HomeView);
+
+    private void ShowView(FrameworkElement view)
+    {
+        foreach (var candidate in new FrameworkElement[] { HomeView, SettingsView, PlanView, WordBookView, ResultsView })
+        {
+            candidate.Visibility = ReferenceEquals(candidate, view) ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        StudyView.Visibility = Visibility.Collapsed;
+    }
+
+    private async void DockLeft_Click(object sender, RoutedEventArgs e) => await SetDockAsync(DockSide.Left);
+
+    private async void DockRight_Click(object sender, RoutedEventArgs e) => await SetDockAsync(DockSide.Right);
+
+    private async Task SetDockAsync(DockSide side)
+    {
+        if (_dockSide == side)
+        {
+            return;
+        }
+
+        _dockSide = side;
+        await _database.SetSettingAsync("DockSide", side == DockSide.Left ? "Left" : "Right");
+        UpdateSettingsUi();
+        RevealWithFreshBackdrop();
+    }
+
+    private async void ThemeMist_Click(object sender, RoutedEventArgs e) => await SetThemeAsync("mist");
+
+    private async void ThemeIce_Click(object sender, RoutedEventArgs e) => await SetThemeAsync("ice");
+
+    private async void ThemeNight_Click(object sender, RoutedEventArgs e) => await SetThemeAsync("night");
+
+    private async Task SetThemeAsync(string theme)
+    {
+        _theme = theme;
+        await _database.SetSettingAsync("Theme", theme);
+        ApplyTheme();
+        UpdateSettingsUi();
+        // The drawer is on screen, so the backdrop has to be re-sampled from off screen.
+        RevealWithFreshBackdrop();
+    }
+
+    private async void ReleaseLimitDown_Click(object sender, RoutedEventArgs e) => await SetReleaseLimitAsync(_releaseLimit - 50);
+
+    private async void ReleaseLimitUp_Click(object sender, RoutedEventArgs e) => await SetReleaseLimitAsync(_releaseLimit + 50);
+
+    private async Task SetReleaseLimitAsync(int value)
+    {
+        _releaseLimit = Math.Clamp(value, 50, 500);
+        await _database.SetSettingAsync("ReleaseLimit", _releaseLimit.ToString(CultureInfo.InvariantCulture));
+        UpdateSettingsUi();
+    }
+
+    private async void DailyTargetDown_Click(object sender, RoutedEventArgs e) => await SetDailyTargetAsync(_dailyTarget - 10);
+
+    private async void DailyTargetUp_Click(object sender, RoutedEventArgs e) => await SetDailyTargetAsync(_dailyTarget + 10);
+
+    private async Task SetDailyTargetAsync(int value)
+    {
+        _dailyTarget = Math.Clamp(value, 10, 200);
+        await _database.SetDailyNewWordTargetAsync(DateOnly.FromDateTime(DateTime.Today), _dailyTarget);
+        UpdateSettingsUi();
+    }
+
+    private async void ToggleStartup_Click(object sender, RoutedEventArgs e)
+    {
+        _launchOnStartup = !_launchOnStartup;
+        try
+        {
+            StartupRegistration.Set(_launchOnStartup, Environment.ProcessPath ?? string.Empty);
+            await _database.SetSettingAsync("Startup", _launchOnStartup ? "1" : "0");
+        }
+        catch (Exception exception)
+        {
+            _launchOnStartup = !_launchOnStartup;
+            StatusText.Text = $"开机启动设置失败：{exception.Message}";
+        }
+
+        UpdateSettingsUi();
+    }
+
+    private async void ToggleAutoHide_Click(object sender, RoutedEventArgs e)
+    {
+        _autoHide = !_autoHide;
+        await _database.SetSettingAsync("AutoHide", _autoHide ? "1" : "0");
+        UpdateSettingsUi();
+    }
+
+    private async void GlassAlphaDown_Click(object sender, RoutedEventArgs e) => await SetGlassAlphaAsync(-0x08);
+
+    private async void GlassAlphaUp_Click(object sender, RoutedEventArgs e) => await SetGlassAlphaAsync(0x08);
+
+    private async Task SetGlassAlphaAsync(int delta)
+    {
+        _glassAlpha = (byte)Math.Clamp(_glassAlpha + delta, 0x08, 0x96);
+        await _database.SetSettingAsync("GlassAlpha", _glassAlpha.ToString(CultureInfo.InvariantCulture));
+        ApplyTheme();
+        UpdateSettingsUi();
+        RevealWithFreshBackdrop();
+    }
+
+    private void UpdateSettingsUi()
+    {
+        StyleSegment(DockLeftButton, _dockSide == DockSide.Left);
+        StyleSegment(DockRightButton, _dockSide == DockSide.Right);
+        StyleSegment(ThemeMistButton, _theme == "mist");
+        StyleSegment(ThemeIceButton, _theme == "ice");
+        StyleSegment(StartupButton, _launchOnStartup);
+        StyleSegment(AutoHideButton, _autoHide);
+        StartupButton.Content = _launchOnStartup ? "开" : "关";
+        AutoHideButton.Content = _autoHide ? "开" : "关";
+        ReleaseLimitText.Text = _releaseLimit.ToString(CultureInfo.InvariantCulture);
+        GlassAlphaText.Text = $"{Math.Round(_glassAlpha / 255.0 * 100)}%";
+        DailyTargetText.Text = _dailyTarget.ToString(CultureInfo.InvariantCulture);
+        PlanRemainingText.Text = _newRemaining.ToString(CultureInfo.InvariantCulture);
+        var days = Math.Max(1, (int)Math.Ceiling(_newRemaining / (double)_dailyTarget));
+        PlanDaysText.Text = _newRemaining == 0 ? "已完成" : $"{days} 天";
+        PlanBookText.Text = $"词书：{_activeBookName}";
+    }
+
+    private void StyleSegment(System.Windows.Controls.Button button, bool selected)
+    {
+        button.Background = selected ? AccentBrush : System.Windows.Media.Brushes.Transparent;
+        button.Foreground = selected ? System.Windows.Media.Brushes.White : (System.Windows.Media.Brush)FindResource("TextSecondary");
+        button.BorderBrush = selected ? AccentBrush : BorderSoftBrush;
+    }
+
+    private async Task ShowWordBookAsync()
+    {
+        try
+        {
+            var books = await _database.GetWordBookSummariesAsync();
+            _bookCount = Math.Max(1, books.Count);
+            BookCountText.Text = $"当前 {_bookCount} 本";
+            BookListPanel.Children.Clear();
+
+            foreach (var book in books)
+            {
+                BookListPanel.Children.Add(BuildBookRow(book));
+            }
+
+            ShowView(WordBookView);
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"读取词书失败：{exception.Message}";
+        }
+    }
+
+    private System.Windows.Controls.Border BuildBookRow(WordBookSummary book)
+    {
+        var percent = book.WordCount == 0 ? 0 : book.LearnedCount * 100.0 / book.WordCount;
+
+        var texts = new System.Windows.Controls.StackPanel();
+        texts.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            Text = book.Name,
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = (System.Windows.Media.Brush)Resources["TextPrimary"],
+            TextWrapping = TextWrapping.Wrap
+        });
+        texts.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            Text = $"{book.WordCount:N0} 词 · 已学 {book.LearnedCount:N0} · {percent:0.0}%",
+            FontSize = 9.5,
+            Margin = new Thickness(0, 5, 0, 0),
+            Foreground = (System.Windows.Media.Brush)Resources["TextSecondary"]
+        });
+        texts.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            Text = book.Source,
+            FontSize = 8,
+            Margin = new Thickness(0, 4, 0, 0),
+            Foreground = (System.Windows.Media.Brush)Resources["TextSecondary"],
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.8
+        });
+
+        var action = new System.Windows.Controls.Button
+        {
+            Content = book.IsActive ? "使用中" : "切换",
+            Width = 54,
+            Height = 26,
+            FontSize = 10,
+            IsEnabled = !book.IsActive,
+            VerticalAlignment = VerticalAlignment.Center,
+            Style = (Style)Resources["SegmentButton"]
+        };
+        if (!book.IsActive)
+        {
+            action.Tag = book.Id;
+            action.Click += SwitchBook_Click;
+        }
+
+        var row = new System.Windows.Controls.Grid();
+        row.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition());
+        row.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new GridLength(62) });
+        System.Windows.Controls.Grid.SetColumn(texts, 0);
+        System.Windows.Controls.Grid.SetColumn(action, 1);
+        row.Children.Add(texts);
+        row.Children.Add(action);
+
+        return new System.Windows.Controls.Border
+        {
+            CornerRadius = new CornerRadius(16),
+            Background = (System.Windows.Media.Brush)Resources["PanelFill"],
+            BorderBrush = (System.Windows.Media.Brush)Resources["PanelStroke"],
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(14, 12, 12, 12),
+            Margin = new Thickness(0, 0, 0, 9),
+            Child = row
+        };
+    }
+
+    private async void SwitchBook_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button { Tag: int id })
+        {
+            return;
+        }
+
+        try
+        {
+            await _database.SetActiveWordBookAsync(id);
+            _activeBookName = (await _database.GetWordBookSummariesAsync())
+                .FirstOrDefault(book => book.IsActive)?.Name ?? "—";
+            _newRemaining = await _database.CountUnstudiedWordsAsync();
+            var dashboard = await _database.GetDashboardAsync(DateOnly.FromDateTime(DateTime.Today));
+            _reviewRemaining = dashboard.DueReviewCount;
+            _todayStudied = dashboard.TodayUniqueWordsStudied;
+            _totalStudied = dashboard.UniqueWordsStudied;
+            RefreshDashboard();
+            StatusText.Text = "词书已切换";
+            await ShowWordBookAsync();
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"切换失败：{exception.Message}";
+        }
+    }
+
+    private async Task ShowResultsAsync()
+    {
+        try
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var dashboard = await _database.GetDashboardAsync(today);
+            var stats = await _database.GetRecentDailyStatsAsync(today, 90);
+            var byDate = stats.ToDictionary(stat => stat.Date);
+
+            var activeDays = stats.Count(stat => stat.UniqueWordsStudied > 0);
+            var streak = 0;
+            for (var day = today; ; day = day.AddDays(-1))
+            {
+                if (!byDate.TryGetValue(day, out var entry) || entry.UniqueWordsStudied <= 0)
+                {
+                    break;
+                }
+
+                streak++;
+            }
+
+            ResultActiveDaysText.Text = activeDays.ToString(CultureInfo.InvariantCulture);
+            ResultStreakText.Text = streak.ToString(CultureInfo.InvariantCulture);
+
+            var todaySeconds = byDate.TryGetValue(today, out var todayStat) ? todayStat.EffectiveSeconds : 0;
+            ResultSummaryText.Text =
+                $"累计学习 {dashboard.UniqueWordsStudied:N0} 词 · 今日 {dashboard.TodayUniqueWordsStudied} 词 · " +
+                $"有效 {FormatDuration(todaySeconds)}";
+
+            BuildHeatmap(today, byDate);
+
+            ShowView(ResultsView);
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"读取学习成果失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>
+    /// GitHub-style contribution calendar: one column per week, Monday on top, 90 days back.
+    /// </summary>
+    private void BuildHeatmap(DateOnly today, IReadOnlyDictionary<DateOnly, DailyStat> byDate)
+    {
+        const int window = 90;
+        var first = today.AddDays(-(window - 1));
+        var startOffset = ((int)first.DayOfWeek + 6) % 7;   // Monday = 0
+        var gridStart = first.AddDays(-startOffset);
+        var weeks = (startOffset + window + 6) / 7;
+
+        HeatmapGrid.Children.Clear();
+        HeatmapGrid.ColumnDefinitions.Clear();
+        HeatmapGrid.RowDefinitions.Clear();
+        HeatMonthRow.Children.Clear();
+        HeatMonthRow.ColumnDefinitions.Clear();
+
+        for (var column = 0; column < weeks; column++)
+        {
+            HeatmapGrid.ColumnDefinitions.Add(new ColumnDefinition());
+            HeatMonthRow.ColumnDefinitions.Add(new ColumnDefinition());
+        }
+
+        for (var row = 0; row < 7; row++)
+        {
+            HeatmapGrid.RowDefinitions.Add(new RowDefinition());
+        }
+
+        var peak = Math.Max(1, byDate.Values.Where(stat => stat.Date >= first).Select(stat => stat.UniqueWordsStudied).DefaultIfEmpty(0).Max());
+        var cells = new Dictionary<DateOnly, Border>();
+
+        for (var index = 0; index < weeks * 7; index++)
+        {
+            var date = gridStart.AddDays(index);
+            var inWindow = date >= first && date <= today;
+            var count = inWindow && byDate.TryGetValue(date, out var stat) ? stat.UniqueWordsStudied : 0;
+
+            var cell = new Border
+            {
+                CornerRadius = new CornerRadius(2),
+                Margin = new Thickness(1.5),
+                Background = count <= 0 ? (System.Windows.Media.Brush)Resources["Divider"] : LevelBrush(count, peak)
+            };
+
+            if (inWindow)
+            {
+                cell.Tag = date;
+                cells[date] = cell;
+                cell.Cursor = System.Windows.Input.Cursors.Hand;
+                cell.ToolTip = BuildHeatTooltip(date, count);
+                cell.MouseLeftButtonUp += HeatCell_Click;
+            }
+            else
+            {
+                cell.Opacity = 0.25;
+            }
+
+            Grid.SetColumn(cell, index / 7);
+            Grid.SetRow(cell, index % 7);
+            HeatmapGrid.Children.Add(cell);
+        }
+
+        _heatStats = byDate;
+        _selectedHeatCell = null;
+        HeatDetailText.Text = string.Empty;
+
+        // WORDDRAWER_HEAT_DATE lets a test drive the selection without a real click.
+        var initial = today;
+        if (DateOnly.TryParse(Environment.GetEnvironmentVariable("WORDDRAWER_HEAT_DATE"), out var forced))
+        {
+            initial = forced;
+        }
+
+        if (cells.TryGetValue(initial, out var selectedCell))
+        {
+            SelectHeatCell(selectedCell, initial);
+        }
+
+        // month labels above the first column of each new month
+        var lastMonth = -1;
+        for (var index = 0; index < weeks * 7; index++)
+        {
+            var date = gridStart.AddDays(index);
+            if (date > today || date < first || date.Month == lastMonth || date.Day > 7)
+            {
+                continue;
+            }
+
+            lastMonth = date.Month;
+            var label = new TextBlock
+            {
+                Text = $"{date.Month}月",
+                FontSize = 8,
+                Foreground = (System.Windows.Media.Brush)Resources["TextSecondary"]
+            };
+            Grid.SetColumn(label, index / 7);
+            HeatMonthRow.Children.Add(label);
+        }
+    }
+
+    private System.Windows.Controls.ToolTip BuildHeatTooltip(DateOnly date, int count)
+    {
+        var seconds = _heatStats.TryGetValue(date, out var stat) ? stat.EffectiveSeconds : 0;
+        return new System.Windows.Controls.ToolTip
+        {
+            Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0xF2, 0x1B, 0x28, 0x36)),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(9, 6, 9, 6),
+            HasDropShadow = true,
+            Content = new TextBlock
+            {
+                Text = $"{date:yyyy-MM-dd}\n背了 {count} 词 · 有效 {FormatDuration(seconds)}",
+                FontSize = 10,
+                LineHeight = 16,
+                Foreground = System.Windows.Media.Brushes.White
+            }
+        };
+    }
+
+    private void HeatCell_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is Border { Tag: DateOnly date } cell)
+        {
+            SelectHeatCell(cell, date);
+        }
+    }
+
+    private void SelectHeatCell(Border cell, DateOnly date)
+    {
+        if (_selectedHeatCell is not null)
+        {
+            _selectedHeatCell.BorderThickness = new Thickness(0);
+        }
+
+        _selectedHeatCell = cell;
+        cell.BorderThickness = new Thickness(1.4);
+        cell.BorderBrush = (System.Windows.Media.Brush)Resources["TextPrimary"];
+
+        var count = _heatStats.TryGetValue(date, out var stat) ? stat.UniqueWordsStudied : 0;
+        var seconds = _heatStats.TryGetValue(date, out var same) ? same.EffectiveSeconds : 0;
+        HeatDetailText.Text = $"{date.Month} 月 {date.Day} 日 · {count} 词 · {FormatDuration(seconds)}";
+    }
+
+    private System.Windows.Media.Brush LevelBrush(int count, int peak)
+    {
+        var ratio = count / (double)peak;
+        var alpha = ratio <= 0.34 ? (byte)0x55 : ratio <= 0.67 ? (byte)0x99 : (byte)0xFF;
+        var brush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(alpha, 0x28, 0x99, 0xD6));
+        brush.Freeze();
+        return brush;
+    }
+
+    private async Task StartStudySessionAsync()
+    {
+        if (StudyView.Visibility == Visibility.Visible)
+        {
+            return;
+        }
+
+        try
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var target = await _database.GetDailyNewWordTargetAsync(today);
+            var words = await _database.GetNextUnstudiedWordsAsync(target);
+
+            if (words.Count == 0)
+            {
+                StatusText.Text = "词书里的新词已经学完了";
+                return;
+            }
+
+            BeginSession(words.Select(word => new SessionEntry(word, null)).ToList(), review: false);
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"读取新词失败：{exception.Message}";
+        }
+    }
+
+    private async Task StartReviewSessionAsync()
+    {
+        if (StudyView.Visibility == Visibility.Visible)
+        {
+            return;
+        }
+
+        try
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var due = await _database.GetDueReviewItemsAsync(today);
+            if (due.Count == 0)
+            {
+                StatusText.Text = "今天没有到期复习词";
+                return;
+            }
+
+            var byId = due.ToDictionary(item => item.WordId);
+            var queue = _reviewScheduler.BuildQueue(due.Select(item => item.Card), today, _releaseLimit);
+            if (queue.Count == 0)
+            {
+                StatusText.Text = "今天没有到期复习词";
+                return;
+            }
+
+            // Persist the release so tomorrow's budget is not recomputed from scratch.
+            var newlyReleased = queue
+                .Where(card => card.ReleasedDate == today && byId[card.WordId].Card.ReleasedDate is null)
+                .Select(card => card.WordId)
+                .ToArray();
+            if (newlyReleased.Length > 0)
+            {
+                await _database.MarkReleasedAsync(newlyReleased, today);
+            }
+
+            var entries = queue
+                .Select(card =>
+                {
+                    var item = byId[card.WordId];
+                    var word = new StudyWord(item.WordId, item.Sequence, item.English, item.PartOfSpeech, item.Meaning);
+                    return new SessionEntry(word, card);
+                })
+                .ToList();
+
+            BeginSession(entries, review: true);
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"读取复习队列失败：{exception.Message}";
+        }
+    }
+
+    private void BeginSession(List<SessionEntry> entries, bool review)
+    {
+        _session.Clear();
+        _session.AddRange(entries);
+        _sessionTotal = entries.Count;
+        _isReview = review;
+        _wordIndex = 0;
+        _answered.Clear();
+        HomeView.Visibility = Visibility.Collapsed;
+        StudyView.Visibility = Visibility.Visible;
+        SessionTitleText.Text = review ? "复习" : "学习新词";
+        _clock.Reset();
+        _studyTimer.Start();
+        ShowCurrentWord();
+        StudyView.Focus();
+    }
+
+    private void FinishSession()
+    {
+        var completed = _sessionTotal;
+        FlushStudyTime();
+        StudyView.Visibility = Visibility.Collapsed;
+        HomeView.Visibility = Visibility.Visible;
+        _session.Clear();
+        _sessionTotal = 0;
+        _wordIndex = 0;
+        RefreshDashboard();
+        StatusText.Text = _isReview ? $"本次复习完成 {completed} 个" : $"本次学习完成 {completed} 个";
+    }
+
+    private void BackHome_Click(object sender, RoutedEventArgs e)
+    {
+        FlushStudyTime();
+        _session.Clear();
+        _sessionTotal = 0;
+        _wordIndex = 0;
+        StudyView.Visibility = Visibility.Collapsed;
+        HomeView.Visibility = Visibility.Visible;
+        RefreshDashboard();
+        StatusText.Text = "已返回首页 · 进度已保存";
+    }
+
+    /// <summary>Stops the clock and writes the counted time to today's row.</summary>
+    private void FlushStudyTime()
+    {
+        _studyTimer.Stop();
+        var seconds = _clock.EffectiveSeconds;
+        _clock.Reset();
+        if (seconds <= 0)
+        {
+            return;
+        }
+
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        _ = _database.AddEffectiveSecondsAsync(today, seconds)
+            .ContinueWith(
+                task => Dispatcher.Invoke(() => StatusText.Text = $"本次有效学习 {FormatDuration(seconds)}"),
+                TaskScheduler.Default);
+    }
+
+    private static string FormatDuration(long seconds)
+    {
+        if (seconds < 60)
+        {
+            return $"{seconds} 秒";
+        }
+
+        var minutes = seconds / 60;
+        if (minutes < 60)
+        {
+            return $"{minutes} 分钟";
+        }
+
+        return $"{minutes / 60} 小时 {minutes % 60} 分";
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LastInputInfo
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetLastInputInfo(ref LastInputInfo plii);
+
+    /// <summary>Time since the last keyboard or mouse input anywhere on the desktop.</summary>
+    private static TimeSpan IdleTime()
+    {
+        var info = new LastInputInfo { cbSize = (uint)Marshal.SizeOf<LastInputInfo>() };
+        if (!GetLastInputInfo(ref info))
+        {
+            return TimeSpan.Zero;
+        }
+
+        var elapsed = unchecked((uint)Environment.TickCount - info.dwTime);
+        return TimeSpan.FromMilliseconds(elapsed);
+    }
+
+    private void PreviousWord_Click(object sender, RoutedEventArgs e) => PreviousWord();
+
+    private async void Known_Click(object sender, RoutedEventArgs e) => await RecordAndMoveAsync(known: true);
+
+    private async void Unknown_Click(object sender, RoutedEventArgs e) => await RecordAndMoveAsync(known: false);
+
+    private async void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (StudyView.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        if (e.Key == Key.Left)
+        {
+            PreviousWord();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Right)
+        {
+            await RecordAndMoveAsync(known: true);
+            e.Handled = true;
+        }
+    }
+
+    private void PreviousWord()
+    {
+        // Deliberately does not persist feedback.
+        if (_session.Count == 0)
+        {
+            return;
+        }
+
+        if (_wordIndex == 0)
+        {
+            StatusText.Text = "已经是第一个词";
+            return;
+        }
+
+        _wordIndex--;
+        ShowCurrentWord();
+        StatusText.Text = "仅返回上一词 · 未记录反馈";
+    }
+
+    private async Task RecordAndMoveAsync(bool known)
+    {
+        if (_isRecordingFeedback || _session.Count == 0)
+        {
+            return;
+        }
+
+        if (_answered.Contains(_wordIndex))
+        {
+            // Already recorded this one (the user navigated back with ←).
+            var pending = NextPendingIndex(_wordIndex);
+            if (pending < 0)
+            {
+                FinishSession();
+                return;
+            }
+
+            _wordIndex = pending;
+            ShowCurrentWord(updateStatus: false);
+            return;
+        }
+
+        _isRecordingFeedback = true;
+        var entry = _session[_wordIndex];
+        try
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var card = entry.Card ?? new ReviewCard(entry.Word.Id, today, null, 0, 0, 0, 1);
+            var feedback = known ? ReviewFeedback.Known : ReviewFeedback.Unknown;
+            var schedule = _reviewScheduler.Schedule(card, feedback, today);
+
+            await _database.RecordFeedbackAsync(
+                entry.Word.Id,
+                known ? WordFeedback.Known : WordFeedback.Unknown,
+                DateTimeOffset.Now,
+                schedule.NextDueDate,
+                schedule.Stability,
+                schedule.Difficulty,
+                schedule.ConsecutiveKnown,
+                schedule.Repetitions);
+
+            if (_isReview)
+            {
+                _reviewRemaining = Math.Max(0, _reviewRemaining - 1);
+            }
+            else
+            {
+                _newRemaining = Math.Max(0, _newRemaining - 1);
+                _todayStudied++;
+                _totalStudied++;
+            }
+
+            _answered.Add(_wordIndex);
+            RefreshDashboard();
+            StatusText.Text = known
+                ? $"已保存：认识 · {schedule.NextDueDate:MM-dd} 再复习"
+                : "已保存：不认识 · 明天再看";
+
+            if (_answered.Count >= _session.Count)
+            {
+                FinishSession();
+                return;
+            }
+
+            var next = NextPendingIndex(_wordIndex);
+            if (next < 0)
+            {
+                FinishSession();
+                return;
+            }
+
+            _wordIndex = next;
+            ShowCurrentWord(updateStatus: false);
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"保存失败，未切换单词：{exception.Message}";
+        }
+        finally
+        {
+            _isRecordingFeedback = false;
+        }
+    }
+
+    /// <summary>First unfinished slot after <paramref name="from"/>, or -1 when everything is done.</summary>
+    private int NextPendingIndex(int from)
+    {
+        for (var step = 1; step <= _session.Count; step++)
+        {
+            var index = (from + step) % _session.Count;
+            if (!_answered.Contains(index))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private void ShowCurrentWord(bool updateStatus = true)
+    {
+        if (_session.Count == 0)
+        {
+            return;
+        }
+
+        var word = _session[_wordIndex].Word;
+        EnglishWordText.Text = word.English;
+        MeaningText.Text = $"{word.PartOfSpeech} {word.Meaning}";
+        // The counter is "how many words today", not "how many in this sitting" — it has to
+        // continue from the words already finished before the session started.
+        var target = Math.Max(1, _dailyTarget);
+        var doneToday = _todayStudied + 1;
+        SessionProgressText.Text = $"{doneToday} / {target}";
+        if (updateStatus)
+        {
+            StatusText.Text = "← 仅切换 · → 认识并继续";
+        }
+    }
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+}

@@ -1,0 +1,71 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+
+
+  <ItemGroup>
+
+    <ProjectReference Include="..\WordDrawer.Core\WordDrawer.Core.csproj" />
+
+    <ProjectReference Include="..\WordDrawer.Data\WordDrawer.Data.csproj" />
+
+    <ProjectReference Include="..\WordDrawer.Review\WordDrawer.Review.csproj" />
+
+  </ItemGroup>
+
+
+
+  <ItemGroup>
+
+    <EmbeddedResource Include="Assets\kaoyan-2027.json" />
+
+  </ItemGroup>
+
+
+
+  <PropertyGroup>
+
+    <OutputType>WinExe</OutputType>
+
+    <TargetFramework>net8.0-windows</TargetFramework>
+
+    <Nullable>enable</Nullable>
+
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <UseWPF>true</UseWPF>
+
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../version.txt').Trim())</Version>
+    <Product>词隙 Window Word</Product>
+
+    <AssemblyTitle>词隙</AssemblyTitle>
+
+    <Company>WordDrawer</Company>
+
+    <ApplicationIcon>Assets\worddrawer.ico</ApplicationIcon>
+
+    <UseWindowsForms>true</UseWindowsForms>
+
+  </PropertyGroup>
+
+
+
+  <ItemGroup>
+
+    <Resource Include="Assets\worddrawer.ico" />
+
+    <Resource Include="Assets\logo-256.png" />
+
+    <EmbeddedResource Include="Assets\cet4-2027.json" />
+
+    <EmbeddedResource Include="Assets\cet6-2027.json" />
+
+  </ItemGroup>
+
+
+
+  <ItemGroup>
+    <None Include="piper\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+</Project>
+

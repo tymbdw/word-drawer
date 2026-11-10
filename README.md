@@ -72,4 +72,4 @@ cd output/verify && python extract_books.py cet4 cet4-2027.json
 
 - 词库数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT），只保留了词条、词性和精简释义
 - 语音引擎 [Piper](https://github.com/rhasspy/piper)（MIT）
-- 应用本身代码：见 LICENSE
+- 应用本身代码：MIT，见 LICENSE；第三方组件的完整许可文本见 THIRD-PARTY.md

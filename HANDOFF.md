@@ -24,12 +24,12 @@
 - 安装位置 `%LOCALAPPDATA%\Programs\WordDrawer`（**per-user，不弹 UAC**）；任务：桌面快捷方式（默认不勾）、开机自启（默认不勾，写 HKCU Run `WordDrawer`）。
 - 数据仍写 `%LOCALAPPDATA%\WordDrawer\worddrawer.db`，**与安装目录分离，卸载不删**。
 - **实测**：静默装到 `D:\WordDrawerTest` → 文件齐全、Run 键带引号正确、开始菜单与桌面快捷方式生成、装好的 exe 能启动；卸载后目录/Run 键/快捷方式全部清除；最后已静默安装到默认位置并从该路径启动成功（PID 15072，窗口 1912,228）。
-- **坑**：测试时用 `/DIR=D:\Window Worduild	est-install`（含空格）传参被拆成两个，装到了 `D:\Window`。Inno 的 {app} 因此截断、Run 值变成 `"D:\Window\WordDrawer.App.exe"`。测带空格的路径要么用响应文件，要么直接用无空格目录。
+- **坑**：测试时用 `/DIR=<repo>uild	est-install`（含空格）传参被拆成两个，装到了 `D:\Window`。Inno 的 {app} 因此截断、Run 值变成 `"D:\Window\WordDrawer.App.exe"`。测带空格的路径要么用响应文件，要么直接用无空格目录。
 
 # 词隙（Word Drawer）项目交接说明
 
 > 更新日期：2026-10-17  
-> 项目目录：`D:\Window Word`  
+> 项目目录：`<repo>`  
 > 当前阶段：首页已完成第二轮视觉校正（文字对比度、卡片材质、主按钮、底部导航），编译 0 警告 0 错误、14/14 测试通过，截图实测差距已收敛。
 
 ## 最新停工点（重要）
